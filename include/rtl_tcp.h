@@ -26,9 +26,13 @@ extern "C" {
 
 /*!
  * This enum defines the possible commands in rtl_tcp
+ * commands 0x01..0x0E are compatible to osmocom's rtlsdr
+ * see https://github.com/osmocom/rtl-sdr/blob/master/src/rtl_tcp.c
+ * commands >= 0x40 are extensions
  */
 enum RTL_TCP_COMMANDS {
-    SET_FREQUENCY             = 0x01,
+    SET_FREQUENCY             = 0x01,   /* sets frequency - amending hi word of SET_FREQ_HI32 if present */
+    SET_FREQ_HI32             = 0x56,   /* in addition to SET_FREQUENCY */
     SET_SAMPLE_RATE           = 0x02,
     SET_GAIN_MODE             = 0x03,
     SET_GAIN                  = 0x04,
@@ -41,8 +45,41 @@ enum RTL_TCP_COMMANDS {
     SET_RTL_CRYSTAL           = 0x0B,
     SET_TUNER_CRYSTAL         = 0x0C,
     SET_TUNER_GAIN_BY_INDEX   = 0x0D,
+#if 1
+    /* development branch since 2018-10-03 */
+    SET_BIAS_TEE              = 0x0E,
+    SET_TUNER_BANDWIDTH       = 0x40,
+#else
+    /* prev code - used in ExtIO - to build compatible rtl_tcp.exe */
     SET_TUNER_BANDWIDTH       = 0x0E,
     SET_BIAS_TEE              = 0x0F
+#endif
+    UDP_ESTABLISH             = 0x41,
+    UDP_TERMINATE             = 0x42,
+    SET_I2C_TUNER_REGISTER    = 0x43,   /* for experiments: 32 bit data word:
+                                         * 31 .. 20: register (12 bits)
+                                         * 19 .. 12: mask (8 bits)
+                                         * 11 ..  0: data (12 bits) */
+    SET_I2C_TUNER_OVERRIDE    = 0x44,   /* encoding as with SET_I2C_TUNER_REGISTER
+                                         * data (bits 11 .. 0) > 255 removes override */
+    SET_TUNER_BW_IF_CENTER    = 0x45,   /* freq from SET_FREQUENCY stays in center;
+                                         * the bandwidth (from SET_TUNER_BANDWIDTH)
+                                         * is set to be centered at given IF frequency */
+    SET_TUNER_IF_MODE         = 0x46,   /* set tuner IF mode - or gain */
+    SET_SIDEBAND              = 0x47,   /* Mixer Sideband for R820T */
+    REPORT_I2C_REGS           = 0x48,   /* perodically report I2C registers
+                                         * - if reverse channel is enabled */
+
+    GPIO_SET_OUTPUT_MODE      = 0x49,   /* rtlsdr_set_gpio_output() */
+    GPIO_SET_INPUT_MODE       = 0x50,   /* rtlsdr_set_gpio_input() */
+    GPIO_GET_IO_STATUS        = 0x51,   /* rtlsdr_set_gpio_status() */
+    GPIO_WRITE_PIN            = 0x52,   /* rtlsdr_set_gpio_output() and rtlsdr_set_gpio_bit() */
+    GPIO_READ_PIN             = 0x53,   /* rtlsdr_get_gpio_bit() */
+    GPIO_GET_BYTE             = 0x54,   /* rtlsdr_get_gpio_byte() */
+    
+    IS_TUNER_PLL_LOCKED       = 0x55,   /* rtlsdr_is_tuner_PLL_locked() */
+
+    /* SET_FREQ_HI32          = 0x56,    * rtlsdr_set_center_freq64() */
 };
 
 #ifdef __cplusplus

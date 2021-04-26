@@ -15,7 +15,9 @@
 #include <netinet/in.h>
 #include <netdb.h>
 #include <pthread.h>
+
 #include <rtl-sdr.h>
+#include <rtl_app_ver.h>
 #include "rtlsdr_rpc_msg.h"
 
 
@@ -398,6 +400,7 @@ static const char* op_to_string(rtlsdr_rpc_op_t op)
     "RTLSDR_RPC_OP_GET_TUNER_GAIN",
     "RTLSDR_RPC_OP_SET_TUNER_IF_GAIN",
     "RTLSDR_RPC_OP_SET_TUNER_GAIN_MODE",
+    "RTLSDR_RPC_OP_SET_GET_TUNER_BW",
     "RTLSDR_RPC_OP_SET_SAMPLE_RATE",
     "RTLSDR_RPC_OP_GET_SAMPLE_RATE",
     "RTLSDR_RPC_OP_SET_TESTMODE",
@@ -789,6 +792,26 @@ static int handle_query
       break ;
     }
 
+  case RTLSDR_RPC_OP_SET_GET_TUNER_BW:
+    {
+      uint32_t did;
+      uint32_t bw;
+      uint32_t applied_bw;
+      int32_t apply_bw;
+
+      if (rtlsdr_rpc_msg_pop_uint32(q, &did)) goto on_error;
+      if (rtlsdr_rpc_msg_pop_uint32(q, &bw)) goto on_error;
+      if (rtlsdr_rpc_msg_pop_int32(q, &apply_bw)) goto on_error;
+
+      if ((rpcd->dev == NULL) || (rpcd->did != did)) goto on_error;
+
+      err = rtlsdr_set_and_get_tuner_bandwidth(rpcd->dev, bw, &applied_bw, (int)apply_bw);
+      if (err) goto on_error;
+      if (rtlsdr_rpc_msg_push_uint32(r, applied_bw)) goto on_error;
+
+      break ;
+    }
+
   case RTLSDR_RPC_OP_SET_SAMPLE_RATE:
     {
       uint32_t did;
@@ -1101,9 +1124,15 @@ static int do_rpcd(rpcd_t* rpcd)
 
 void usage(void)
 {
+	fprintf(stderr,
+		"rtl_rpcd, a Remote Procedure Call server for RTL2832 based SDR-receivers\n"
+		"rtl_rpcd version %d.%d %s (%s)\n"
+		"rtl-sdr  library %d.%d %s\n\n",
+		APP_VER_MAJOR, APP_VER_MINOR, APP_VER_ID, __DATE__,
+		rtlsdr_get_version() >>16, rtlsdr_get_version() & 0xFFFF,
+		rtlsdr_get_ver_id() );
   fprintf(stderr,
-    "rtl_rpcd, a Remote Procedure Call server for RTL-SDR dongles\n\n"
-    "Use:\trtl_rpcd [-options]\n"
+    "Usage:\trtl_rpcd [-options]\n"
     "\t[-a address]\tAddress to listen on (default: 0.0.0.0 for all), or RTLSDR_RPC_SERV_ADDR\n"
     "\t[-p port]\tPort number to listen on (default: 40000), or RTLSDR_RPC_SERV_PORT\n"
     "\t[-I port_ir]\tinfrared sensor listen port (default: 0=none)\n"

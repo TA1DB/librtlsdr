@@ -28,7 +28,8 @@
 #include "getopt/getopt.h"
 #endif
 
-#include "rtl-sdr.h"
+#include <rtl-sdr.h>
+#include <rtl_app_ver.h>
 
 #define EEPROM_SIZE	256
 #define MAX_STR_SIZE	256
@@ -67,12 +68,21 @@ void dump_config(rtlsdr_config_t *conf)
 void usage(void)
 {
 	fprintf(stderr,
-		"rtl_eeprom, an EEPROM programming tool for "
-		"RTL2832 based DVB-T receivers\n\n"
-		"Usage:\n"
+		"rtl_eeprom, an EEPROM programming tool for RTL2832 based SDR-receivers\n"
+		"rtl_eeprom version %d.%d %s (%s)\n"
+		"rtl-sdr    library %d.%d %s\n\n",
+		APP_VER_MAJOR, APP_VER_MINOR, APP_VER_ID, __DATE__,
+		rtlsdr_get_version() >>16, rtlsdr_get_version() & 0xFFFF,
+		rtlsdr_get_ver_id() );
+	fprintf(stderr,
+		"Usage:\trtl_eeprom [-options]\n"
 		"\t[-d device_index (default: 0)]\n"
 		"\t[-m <str> set manufacturer string]\n"
 		"\t[-p <str> set product string]\n"
+		"\t[-M <id> set manufacturer ID (aka vendor ID) in hexadecimal]\n"
+		"\t[-P <id> set product ID in hexadecimal]\n"
+		"\t[-n sets manufacturer and product ID to 0x1209/0x2832]\n"
+		"\t[    as with '-g realtek_sdr']\n"
 		"\t[-s <str> set serial number string]\n"
 		"\t[-i <0,1> disable/enable IR-endpoint]\n"
 		"\t[-g <conf> generate default config and write to device]\n"
@@ -82,10 +92,11 @@ void usage(void)
 		"\t[   noxon\t\tTerratec NOXON DAB Stick]\n"
 		"\t[   terratec_black\tTerratec T Stick Black]\n"
 		"\t[   terratec_plus\tTerratec T Stick+ (DVB-T/DAB)]\n"
+		"\t[   realtek_sdr\t\tRealtek SDR - without DVB compatibility]\n"
 		"\t[-w <filename> write dumped file to device]\n"
 		"\t[-r <filename> dump EEPROM to file]\n"
 		"\t[-h display this help text]\n"
-		"\nUse on your own risk, especially -w!\n");
+		"\nUse on your own risk, especially -w, -M and -P!\n");
 	exit(1);
 }
 
@@ -181,6 +192,7 @@ enum configs {
 	TERRATEC_NOXON,
 	TERRATEC_T_BLACK,
 	TERRATEC_T_PLUS,
+	REALTEK_SDR,
 };
 
 void gen_default_conf(rtlsdr_config_t *conf, int config)
@@ -241,6 +253,17 @@ void gen_default_conf(rtlsdr_config_t *conf, int config)
 		conf->enable_ir = 1;
 		conf->remote_wakeup = 0;
 		break;
+	case REALTEK_SDR:
+		fprintf(stderr, "Realtek SDR\n");
+		conf->vendor_id = 0x1209;
+		conf->product_id = 0x2832;
+		strcpy(conf->manufacturer, "Realtek");
+		strcpy(conf->product, "RTL2832U_SDR");
+		strcpy(conf->serial, "00000001");
+		conf->have_serial = 1;
+		conf->enable_ir = 0;
+		conf->remote_wakeup = 0;
+		break;
 	default:
 		break;
 	};
@@ -255,6 +278,8 @@ int main(int argc, char **argv)
 	FILE *file = NULL;
 	char *manuf_str = NULL;
 	char *product_str = NULL;
+	int manuf_id = 0;
+	int product_id = 0;
 	char *serial_str = NULL;
 	uint8_t buf[EEPROM_SIZE];
 	rtlsdr_config_t conf;
@@ -264,7 +289,7 @@ int main(int argc, char **argv)
 	int ir_endpoint = 0;
 	char ch;
 
-	while ((opt = getopt(argc, argv, "d:m:p:s:i:g:w:r:h?")) != -1) {
+	while ((opt = getopt(argc, argv, "d:m:p:M:P:ns:i:g:w:r:h?")) != -1) {
 		switch (opt) {
 		case 'd':
 			dev_index = atoi(optarg);
@@ -275,6 +300,19 @@ int main(int argc, char **argv)
 			break;
 		case 'p':
 			product_str = optarg;
+			change = 1;
+			break;
+		case 'M':
+			manuf_id = (int)strtol(optarg, NULL, 16);
+			change = 1;
+			break;
+		case 'P':
+			product_id = (int)strtol(optarg, NULL, 16);
+			change = 1;
+			break;
+		case 'n':
+			manuf_id = 0x1209;
+			product_id = 0x2832;
 			change = 1;
 			break;
 		case 's':
@@ -296,13 +334,15 @@ int main(int argc, char **argv)
 				default_config = TERRATEC_T_BLACK;
 			else if (!strcmp(optarg, "terratec_plus"))
 				default_config = TERRATEC_T_PLUS;
-
+			else if (!strcmp(optarg, "realtek_sdr"))
+				default_config = REALTEK_SDR;
 			if (default_config != CONF_NONE)
 				change = 1;
 			break;
 		case 'w':
 			flash_file = 1;
 			change = 1;
+			/* fall-through */
 		case 'r':
 			filename = optarg;
 			break;
@@ -368,15 +408,35 @@ int main(int argc, char **argv)
 		}
 	}
 
-	if (manuf_str)
-		strncpy((char*)&conf.manufacturer, manuf_str, MAX_STR_SIZE);
+	if (manuf_str) {
+		int len = strlen(manuf_str);
+		if (len > MAX_STR_SIZE)
+			len = MAX_STR_SIZE;
+		memset(&conf.manufacturer[0], 0, MAX_STR_SIZE * sizeof(char));
+		memcpy(&conf.manufacturer[0], manuf_str,  len * sizeof(char));
+	}
 
-	if (product_str)
-		strncpy((char*)&conf.product, product_str, MAX_STR_SIZE);
+	if (product_str) {
+		int len = strlen(product_str);
+		if (len > MAX_STR_SIZE)
+			len = MAX_STR_SIZE;
+		memset(&conf.product[0], 0, MAX_STR_SIZE  * sizeof(char));
+		memcpy(&conf.product[0], product_str, len * sizeof(char));
+	}
+
+	if (manuf_id > 0)
+		conf.vendor_id = manuf_id;
+
+	if (product_id > 0)
+		conf.product_id = product_id;
 
 	if (serial_str) {
+		int len = strlen(serial_str);
+		if (len > MAX_STR_SIZE)
+			len = MAX_STR_SIZE;
 		conf.have_serial = 1;
-		strncpy((char*)&conf.serial, serial_str, MAX_STR_SIZE);
+		memset(&conf.serial[0], 0, MAX_STR_SIZE * sizeof(char));
+		memcpy(&conf.serial[0], serial_str, len * sizeof(char));
 	}
 
 	if (ir_endpoint != 0)

@@ -66,8 +66,10 @@
 #include <pthread.h>
 #include <libusb.h>
 
-#include "rtl-sdr.h"
+#include <rtl-sdr.h>
+#include <rtl_app_ver.h>
 #include "convenience/convenience.h"
+#include "convenience/rtl_convenience.h"
 
 #define MAX(x, y) (((x) > (y)) ? (x) : (y))
 
@@ -92,10 +94,10 @@ int *window_coefs;
 struct tuning_state
 /* one per tuning range */
 {
-	int freq;
+	uint64_t freq;
 	int rate;
 	int bin_e;
-	long *avg;  /* length == 2^bin_e */
+	int64_t *avg;  /* length == 2^bin_e */
 	int samples;
 	int downsample;
 	int downsample_passes;  /* for the recursive filter */
@@ -110,6 +112,8 @@ struct tuning_state
 	//pthread_mutex_t buf_mutex;
 };
 
+enum time_modes { VERBOSE_TIME, EPOCH_TIME };
+
 /* 3000 is enough for 3GHz b/w worst case */
 #define MAX_TUNES	3000
 struct tuning_state tunes[MAX_TUNES];
@@ -118,12 +122,19 @@ int tune_count = 0;
 int boxcar = 1;
 int comp_fir_size = 0;
 int peak_hold = 0;
+static enum time_modes time_mode = VERBOSE_TIME;
 
 void usage(void)
 {
 	fprintf(stderr,
-		"rtl_power, a simple FFT logger for RTL2832 based DVB-T receivers\n\n"
-		"Use:\trtl_power -f freq_range [-options] [filename]\n"
+		"rtl_power, a simple FFT logger for RTL2832 based SDR-receivers\n"
+		"rtl_power version %d.%d %s (%s)\n"
+		"rtl-sdr   library %d.%d %s\n\n",
+		APP_VER_MAJOR, APP_VER_MINOR, APP_VER_ID, __DATE__,
+		rtlsdr_get_version() >>16, rtlsdr_get_version() & 0xFFFF,
+		rtlsdr_get_ver_id() );
+	fprintf(stderr,
+		"Usage:\trtl_power -f freq_range [-options] [filename]\n"
 		"\t-f lower:upper:bin_size [Hz]\n"
 		"\t (bin size is a maximum, smaller more convenient bins\n"
 		"\t  will be used.  valid range 1Hz - 2.8MHz)\n"
@@ -133,7 +144,7 @@ void usage(void)
 		"\t[-e exit_timer (default: off/0)]\n"
 		//"\t[-s avg/iir smoothing (default: avg)]\n"
 		//"\t[-t threads (default: 1)]\n"
-		"\t[-d device_index (default: 0)]\n"
+		"\t[-d device_index or serial (default: 0)]\n"
 		"\t[-g tuner_gain (default: automatic)]\n"
 		"\t[-p ppm_error (default: 0)]\n"
 		"\t[-T enable bias-T on GPIO PIN 0 (works for rtl-sdr.com v3 dongles)]\n"
@@ -408,19 +419,19 @@ void rms_power(struct tuning_state *ts)
 	int i, s;
 	uint8_t *buf = ts->buf8;
 	int buf_len = ts->buf_len;
-	long p, t;
+	int64_t p, t;
 	double dc, err;
 
 	p = t = 0L;
 	for (i=0; i<buf_len; i++) {
 		s = (int)buf[i] - 127;
-		t += (long)s;
-		p += (long)(s * s);
+		t += (int64_t)s;
+		p += (int64_t)(s * s);
 	}
 	/* correct for dc offset in squares */
 	dc = (double)t / (double)buf_len;
 	err = t * 2 * dc - dc * dc * buf_len;
-	p -= (long)round(err);
+	p -= (int64_t)round(err);
 
 	if (!peak_hold) {
 		ts->avg[0] += p;
@@ -435,7 +446,8 @@ void frequency_range(char *arg, double crop)
 // do we want the fewest ranges (easy) or the fewest bins (harder)?
 {
 	char *start, *stop, *step;
-	int i, j, upper, lower, max_size, bw_seen, bw_used, bin_e, buf_len;
+	uint64_t upper, lower;
+	int i, j, max_size, bw_seen, bw_used, bin_e, buf_len;
 	int downsample, downsample_passes;
 	double bin_size;
 	struct tuning_state *ts;
@@ -445,8 +457,8 @@ void frequency_range(char *arg, double crop)
 	stop[-1] = '\0';
 	step = strchr(stop, ':') + 1;
 	step[-1] = '\0';
-	lower = (int)atofs(start);
-	upper = (int)atofs(stop);
+	lower = (uint64_t)(atofs(start) + 0.5);
+	upper = (uint64_t)(atofs(stop) + 0.5);
 	max_size = (int)atofs(step);
 	stop[-1] = ':';
 	step[-1] = ':';
@@ -507,7 +519,7 @@ void frequency_range(char *arg, double crop)
 		ts->crop = crop;
 		ts->downsample = downsample;
 		ts->downsample_passes = downsample_passes;
-		ts->avg = (long*)malloc((1<<bin_e) * sizeof(long));
+		ts->avg = (int64_t*)malloc((1<<bin_e) * sizeof(int64_t));
 		if (!ts->avg) {
 			fprintf(stderr, "Error: malloc.\n");
 			exit(1);
@@ -534,11 +546,11 @@ void frequency_range(char *arg, double crop)
 	fprintf(stderr, "Buffer size: %i bytes (%0.2fms)\n", buf_len, 1000 * 0.5 * (float)buf_len / (float)bw_used);
 }
 
-void retune(rtlsdr_dev_t *d, int freq)
+void retune(rtlsdr_dev_t *d, uint64_t freq)
 {
 	uint8_t dump[BUFFER_DUMP];
 	int n_read;
-	rtlsdr_set_center_freq(d, (uint32_t)freq);
+	rtlsdr_set_center_freq64(d, freq);
 	/* wait for settling and flush buffer */
 	usleep(5000);
 	rtlsdr_read_sync(d, &dump, BUFFER_DUMP, &n_read);
@@ -578,11 +590,11 @@ void remove_dc(int16_t *data, int length)
 {
 	int i;
 	int16_t ave;
-	long sum = 0L;
+	int64_t sum = 0L;
 	for (i=0; i < length; i+=2) {
 		sum += data[i];
 	}
-	ave = (int16_t)(sum / (long)(length));
+	ave = (int16_t)(sum / (int64_t)(length));
 	if (ave == 0) {
 		return;}
 	for (i=0; i < length; i+=2) {
@@ -628,15 +640,16 @@ void downsample_iq(int16_t *data, int length)
 	//remove_dc(data+1, length-1);
 }
 
-long real_conj(int16_t real, int16_t imag)
+int64_t real_conj(int16_t real, int16_t imag)
 /* real(n * conj(n)) */
 {
-	return ((long)real*(long)real + (long)imag*(long)imag);
+	return ((int64_t)real*(int64_t)real + (int64_t)imag*(int64_t)imag);
 }
 
 void scanner(void)
 {
-	int i, j, j2, f, n_read, offset, bin_e, bin_len, buf_len, ds, ds_p;
+	int i, j, j2, n_read, offset, bin_e, bin_len, buf_len, ds, ds_p;
+	uint64_t f;
 	int32_t w;
 	struct tuning_state *ts;
 	bin_e = tunes[0].bin_e;
@@ -646,7 +659,7 @@ void scanner(void)
 		if (do_exit >= 2)
 			{return;}
 		ts = &tunes[i];
-		f = (int)rtlsdr_get_center_freq(dev);
+		f = rtlsdr_get_center_freq64(dev);
 		if (f != ts->freq) {
 			retune(dev, ts->freq);}
 		rtlsdr_read_sync(dev, ts->buf8, buf_len, &n_read);
@@ -717,7 +730,7 @@ void scanner(void)
 void csv_dbm(struct tuning_state *ts)
 {
 	int i, len, ds, i1, i2, bw2, bin_count;
-	long tmp;
+	int64_t tmp;
 	double dbm;
 	len = 1 << ts->bin_e;
 	ds = ts->downsample;
@@ -735,7 +748,7 @@ void csv_dbm(struct tuning_state *ts)
 	/* Hz low, Hz high, Hz step, samples, dbm, dbm, ... */
 	bin_count = (int)((double)len * (1.0 - ts->crop));
 	bw2 = (int)(((double)ts->rate * (double)bin_count) / (len * 2 * ds));
-	fprintf(file, "%i, %i, %.2f, %i, ", ts->freq - bw2, ts->freq + bw2,
+	fprintf(file, "%.0f, %.0f, %.2f, %i, ", (double)(ts->freq - bw2), (double)(ts->freq + bw2),
 		(double)ts->rate / (double)(len*ds), ts->samples);
 	// something seems off with the dbm math
 	i1 = 0 + (int)((double)len * ts->crop * 0.5);
@@ -769,6 +782,7 @@ int main(int argc, char **argv)
 	int f_set = 0;
 	int gain = AUTO_GAIN; // tenths of a dB
 	int dev_index = 0;
+	char dev_label[256];
 	int dev_given = 0;
 	int ppm_error = 0;
 	int interval = 10;
@@ -785,12 +799,12 @@ int main(int argc, char **argv)
 	time_t next_tick;
 	time_t time_now;
 	time_t exit_time = 0;
-	char t_str[50];
+	char t_str[512];
 	struct tm *cal_time;
 	double (*window_fn)(int, int) = rectangle;
 	freq_optarg = "";
 
-	while ((opt = getopt(argc, argv, "f:i:s:t:d:g:p:e:w:c:F:D:1POTh")) != -1) {
+	while ((opt = getopt(argc, argv, "f:i:s:t:d:g:p:e:w:c:F:1EPOhTD:")) != -1) {
 		switch (opt) {
 		case 'f': // lower:upper:bin_size
 			freq_optarg = strdup(optarg);
@@ -798,6 +812,8 @@ int main(int argc, char **argv)
 			break;
 		case 'd':
 			dev_index = verbose_device_search(optarg);
+			strncpy(dev_label, optarg, 255);
+			dev_label[255] = 0;
 			dev_given = 1;
 			break;
 		case 'g':
@@ -844,6 +860,9 @@ int main(int argc, char **argv)
 			break;
 		case '1':
 			single = 1;
+			break;
+		case 'E':
+			time_mode = EPOCH_TIME;
 			break;
 		case 'P':
 			peak_hold = 1;
@@ -988,7 +1007,12 @@ int main(int argc, char **argv)
 			continue;}
 		// time, Hz low, Hz high, Hz step, samples, dbm, dbm, ...
 		cal_time = localtime(&time_now);
-		strftime(t_str, 50, "%Y-%m-%d, %H:%M:%S", cal_time);
+		if (time_mode == VERBOSE_TIME) {
+			strftime(t_str, 512, "%Y-%m-%d, %H:%M:%S", cal_time);
+		}
+		if (time_mode == EPOCH_TIME) {
+			snprintf(t_str, 512, "%u, %s", (unsigned)time_now, dev_label);
+		}
 		for (i=0; i<tune_count; i++) {
 			fprintf(file, "%s, ", t_str);
 			csv_dbm(&tunes[i]);

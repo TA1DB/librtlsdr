@@ -24,6 +24,10 @@
 cmake_minimum_required(VERSION 2.6)
 project(rtlsdr C)
 
+# quite old cmake version - probably for compatibility with old OS versions?
+# see https://cmake.org/cmake/help/cmake2.6docs.html
+
+
 #select the release build type by default to get optimization flags
 if(NOT CMAKE_BUILD_TYPE)
    set(CMAKE_BUILD_TYPE "Release")
@@ -37,11 +41,31 @@ if(NOT LIB_INSTALL_DIR)
    set(LIB_INSTALL_DIR lib)
 endif()
 
+OPTION(LINK_RTLTOOLS_AGAINST_STATIC_LIB "Link rtl-tools statically against librtlsdr" OFF)
+
+OPTION(PROVIDE_UDP_SERVER "Provide UDP server for tests" OFF)
+
+OPTION(WITH_RPC "RPC for non-Windows" OFF)
+
 # Set the version information here
 set(VERSION_INFO_MAJOR_VERSION 0) # increment major on api compatibility changes
-set(VERSION_INFO_MINOR_VERSION 7) # increment minor on feature-level changes
+set(VERSION_INFO_MINOR_VERSION 8) # increment minor on feature-level changes
 set(VERSION_INFO_PATCH_VERSION git) # increment patch for bug fixes and docs
 include(Version) # setup version info
+
+########################################################################
+# Version defines to include in library and tools
+########################################################################
+
+configure_file(
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/rtl_app_ver.h.in
+    ${CMAKE_CURRENT_BINARY_DIR}/src/rtl_app_ver.h
+    @ONLY )
+
+
+if(PROVIDE_UDP_SERVER)
+    add_definitions(-DWITH_UDP_SERVER)
+endif()
 
 ########################################################################
 # Compiler specific setup
@@ -55,7 +79,26 @@ if(CMAKE_COMPILER_IS_GNUCC AND NOT WIN32)
     ADD_DEFINITIONS(-Wdeclaration-after-statement)
     #http://gcc.gnu.org/wiki/Visibility
     add_definitions(-fvisibility=hidden)
+elseif(MSVC14 OR MSVC14)
+#pthread-w32 issue, timespec is now part of time.h
+    ADD_DEFINITIONS(-D_TIMESPEC_DEFINED)
 endif()
+
+OPTION(RTL_STATIC_BUILD "Build rtl-tools static (except RTLSDR.DLL) on MinGW/Win32" ON)
+if(RTL_STATIC_BUILD)
+    if (WIN32)
+        if(MINGW)
+            # Special MINGW stuff here
+            # see https://cmake.org/pipermail/cmake/2012-September/051970.html
+            # see http://stackoverflow.com/questions/13768515/how-to-do-static-linking-of-libwinpthread-1-dll-in-mingw
+            set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -static-libgcc -static")
+            set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
+            set(CMAKE_SHARED_LIBRARY_LINK_C_FLAGS "${CMAKE_SHARED_LIBRARY_LINK_C_FLAGS} -static-libgcc -s")
+            set(CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS "${CMAKE_SHARED_LIBRARY_LINK_CXX_FLAGS} -static-libgcc -static-libstdc++ -s")
+        endif()
+    endif()
+endif()
+
 
 #########################################################################
 # Bug Fix
@@ -70,7 +113,9 @@ ENDIF()
 ########################################################################
 find_package(PkgConfig)
 find_package(LibUSB)
-set(THREADS_USE_PTHREADS_WIN32 true)
+if(WIN32 AND NOT MINGW)
+    set(THREADS_USE_PTHREADS_WIN32 true)
+endif()
 find_package(Threads)
 
 if(NOT LIBUSB_FOUND)
@@ -85,6 +130,7 @@ endif()
 include_directories(
     ${CMAKE_SOURCE_DIR}/include
     ${LIBUSB_INCLUDE_DIR}
+    ${CMAKE_CURRENT_BINARY_DIR}/src
     ${THREADS_PTHREADS_INCLUDE_DIR}
 )
 
